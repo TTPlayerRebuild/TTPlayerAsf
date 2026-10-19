@@ -40,3 +40,7 @@ WMA Reader 使用系统读取器；MP3-in-ASF 自有解析目前要求可定位�
 Win11 的 24-bit Lossless / Pro 立体声与 5.1 已实测；其它系统结果见验证记录。
 
 [验证记录](docs/VALIDATION_20261019.md)；包装层源码许可证 [MIT](LICENSE)。
+
+## 可选格式识别接口
+
+2026-10-20：Reader 工厂增加 Probe，Reader 增加 SourceInfo；旧导出和接口槽位保持不变。声明与辅助实现位于 `include/ttpcomm/audio_format_probe.h` 和 `audio_format_probe_impl.h`，不增加运行时 DLL 依赖。协议原件在相邻 `ttpcomm/sdk/AUDIO_FORMAT_PROBE.md`；新建插件指南在相邻 `rebuild/docs/AUDIO_PLUGIN_DEVELOPMENT_GUIDE.md`。原版播放器继续使用旧接口；错误后缀候选选择和更名提示由支持新协议的重建播放器执行。

@@ -1,3 +1,4 @@
+#include "ttpcomm/audio_format_probe_impl.h"
 #include "io.h"
 #include "native_asf.h"
 #include <wmsdk.h>
@@ -41,7 +42,7 @@ public:
  HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER,ULARGE_INTEGER,DWORD)override{return E_NOTIMPL;}
  HRESULT STDMETHODCALLTYPE Clone(IStream**)override{return E_NOTIMPL;}
 };
-class AsfReader final:public Reader,public Metadata,public Thumbnail,public MetadataCommit{
+class AsfReader final:public Reader,public Metadata,public Thumbnail,public MetadataCommit, public ttp::format::InfoSupport {
  LONG refs_{1};Input input_;ComPtr<IStream> bridge_;HMODULE library_{};ComPtr<IWMSyncReader> reader_;Bytes format_,pending_;WORD stream_number_{};
  DWORD duration_{},bitrate_{},recommended_{4096};std::atomic_bool stopped_{};bool opened_{},ended_{},terminal_{};HRESULT commit_result_{S_OK};
  std::unique_ptr<NativeAsf> native_;bool native_writable_{};
@@ -97,9 +98,19 @@ class AsfReader final:public Reader,public Metadata,public Thumbnail,public Meta
  }
  Cover copy_picture(const Picture*p){require(p&&p->size>=sizeof(Picture),E_INVALIDARG);require(p->bytes&&p->bytes<=60000&&p->data&&p->type<=255,E_INVALIDARG);Cover c;c.mime=p->mime?p->mime:L"image/jpeg";c.description=p->description?p->description:L"";c.type=p->type;c.bytes.assign(p->data,p->data+p->bytes);return c;}
 public:
- HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void**out)override{if(!out)return E_POINTER;*out=nullptr;if(same(id,IID_IUnknown)||same(id,iid_reader))*out=static_cast<Reader*>(this);else if(same(id,iid_metadata))*out=static_cast<Metadata*>(this);else if(same(id,iid_thumbnail))*out=static_cast<Thumbnail*>(this);else if(same(id,iid_metadata_commit))*out=static_cast<MetadataCommit*>(this);else return E_NOINTERFACE;AddRef();return S_OK;}
+ HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void**out)override{
+        if (!out) return E_POINTER;
+        if (IsEqualIID(id, ttp::format::iid_info)) { *out=static_cast<ttp::format::SourceInfo*>(this); AddRef(); return S_OK; }
+if(!out)return E_POINTER;*out=nullptr;if(same(id,IID_IUnknown)||same(id,iid_reader))*out=static_cast<Reader*>(this);else if(same(id,iid_metadata))*out=static_cast<Metadata*>(this);else if(same(id,iid_thumbnail))*out=static_cast<Thumbnail*>(this);else if(same(id,iid_metadata_commit))*out=static_cast<MetadataCommit*>(this);else return E_NOINTERFACE;AddRef();return S_OK;}
  ULONG STDMETHODCALLTYPE AddRef()override{return InterlockedIncrement(&refs_);}ULONG STDMETHODCALLTYPE Release()override{auto n=InterlockedDecrement(&refs_);if(!n)delete this;return n;}
- HRESULT STDMETHODCALLTYPE Open(IStream*stream,DWORD)override{return protect([&]{require(stream,E_POINTER);require(!opened_&&!reader_,E_UNEXPECTED);input_.open(stream);bridge_.reset(new StreamBridge(input_));library_=system_library(L"wmvcore.dll");auto create=reinterpret_cast<CreateReader>(GetProcAddress(library_,"WMCreateSyncReader"));require(create,E_NOTIMPL);check(create(nullptr,0,reader_.put()));auto open_result=reader_->OpenStream(bridge_.p);
+ HRESULT STDMETHODCALLTYPE Open(IStream* probe_stream, DWORD probe_flags) override {
+        const auto probed = PrepareFormatInfo(probe_stream, ttp::format::Asf);
+        if (FAILED(probed)) return probed;
+        const auto opened = OpenImpl(probe_stream, probe_flags);
+        if (opened == S_OK) { if (native_) SetSourceCodec("mp3"); else if (format_.size() >= sizeof(WAVEFORMATEX)) { const auto tag=reinterpret_cast<const WAVEFORMATEX*>(format_.data())->wFormatTag; if (tag==0x160) SetSourceCodec("wmav1"); else if (tag==0x161) SetSourceCodec("wmav2"); else if (tag==0x162) SetSourceCodec("wmapro"); else if (tag==0x163) SetSourceCodec("wmalossless"); else if (tag==0x55) SetSourceCodec("mp3"); } }
+        return CompleteFormatInfo(opened);
+    }
+    HRESULT OpenImpl(IStream*stream,DWORD){return protect([&]{require(stream,E_POINTER);require(!opened_&&!reader_,E_UNEXPECTED);input_.open(stream);bridge_.reset(new StreamBridge(input_));library_=system_library(L"wmvcore.dll");auto create=reinterpret_cast<CreateReader>(GetProcAddress(library_,"WMCreateSyncReader"));require(create,E_NOTIMPL);check(create(nullptr,0,reader_.put()));auto open_result=reader_->OpenStream(bridge_.p);
   if(FAILED(open_result)) {
    reader_->Close();reader_.reset();bridge_.reset();native_=std::make_unique<NativeAsf>(input_);native_->open();format_=native_->format;duration_=native_->duration;bitrate_=native_->bitrate;recommended_=native_->buffer_size();
    // Header editing does not require the unavailable WM reader codec. Preserve
