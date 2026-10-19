@@ -1,0 +1,4 @@
+LIBRARY ttp_asf
+EXPORTS
+    ttpGetSoundAddIn=_ttpGetSoundAddIn@4 @1
+
