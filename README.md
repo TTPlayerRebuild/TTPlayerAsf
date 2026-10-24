@@ -1,5 +1,9 @@
 # ttp_asf
 
+最新补全与验收：[2026-10-24](docs/COMPLETION_20261024.md)。
+
+四类系统 DMO 与同名多值标签的原版对照：[验证记录](docs/DMO_MULTIVALUE_FOLLOWUP_20261024.md)。
+
 原版 TTPlayer ASF Reader、DMO Decoder 两个工厂及接口的独立源码实现。
 使用系统 Windows Media Format Runtime 读取 WMA ASF；MP3-in-ASF 在系统读取器拒绝时由自有包解析接管，再由系统 DMO 解码；
 不依赖旧 ttp_asf.dll，也不把微软闭源编解码内核当作本项目重新实现的代码。

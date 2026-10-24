@@ -18,8 +18,8 @@ std::wstring bounded_string(const wchar_t*p,const Bytes&storage){
  // WM_PICTURE is packed(1); the SDK can place UTF-16 text at odd offsets.
  std::wstring value(count,L'\0');memcpy(value.data(),p,count*sizeof(wchar_t));auto n=value.find(L'\0');require(n!=std::wstring::npos);value.resize(n);return value;
 }
-struct Tag{std::wstring name,value;WMT_ATTR_DATATYPE type{WMT_TYPE_STRING};};
-struct Cover{std::wstring mime,description;Bytes bytes;DWORD type{};Picture view{};};
+struct Tag{std::wstring name,value;WMT_ATTR_DATATYPE type{WMT_TYPE_STRING};WORD language{};};
+struct Cover{std::wstring mime,description;Bytes bytes;DWORD type{};Picture view{};WORD language{};};
 // WM's synchronous reader expects ordinary IStream reads to fill the requested
 // range. The player's network/archived streams may return short blocks and use
 // their extra cancellable Read slot. Keep that contract at the SDK boundary.
@@ -65,10 +65,10 @@ class AsfReader final:public Reader,public Metadata,public Thumbnail,public Meta
    else if(name==L"Bitrate"&&type==WMT_TYPE_DWORD&&bytes==4)memcpy(&bitrate_,data.data(),4);
    else if(name==L"WM/Picture"&&type==WMT_TYPE_BINARY&&bytes>=sizeof(WM_PICTURE)){
     WM_PICTURE picture{};memcpy(&picture,data.data(),sizeof(picture));uintptr_t p=reinterpret_cast<uintptr_t>(picture.pbData),begin=reinterpret_cast<uintptr_t>(data.data());
-    require(p>=begin&&p-begin<=data.size()&&picture.dwDataLen<=data.size()-(p-begin));Cover c;c.mime=bounded_string(picture.pwszMIMEType,data);c.description=bounded_string(picture.pwszDescription,data);c.type=picture.bPictureType;c.bytes.assign(picture.pbData,picture.pbData+picture.dwDataLen);covers_.push_back(std::move(c));
+    require(p>=begin&&p-begin<=data.size()&&picture.dwDataLen<=data.size()-(p-begin));Cover c;c.language=language;c.mime=bounded_string(picture.pwszMIMEType,data);c.description=bounded_string(picture.pwszDescription,data);c.type=picture.bPictureType;c.bytes.assign(picture.pbData,picture.pbData+picture.dwDataLen);covers_.push_back(std::move(c));
    }else if(type==WMT_TYPE_STRING&&bytes>=2&&bytes%2==0){auto*p=reinterpret_cast<const wchar_t*>(data.data());std::wstring value(p,wcsnlen(p,bytes/2));
-    if(!value.empty()&&std::none_of(tags_.begin(),tags_.end(),[&](const Tag&t){return !_wcsicmp(t.name.c_str(),name.c_str());}))tags_.push_back({name,std::move(value),type});}
-   else if(name==L"WM/TrackNumber"&&type==WMT_TYPE_DWORD&&bytes==4){DWORD n{};memcpy(&n,data.data(),4);tags_.push_back({name,std::to_wstring(n),type});}
+    if(!value.empty())tags_.push_back({name,std::move(value),type,language});}
+   else if(name==L"WM/TrackNumber"&&type==WMT_TYPE_DWORD&&bytes==4){DWORD n{};memcpy(&n,data.data(),4);tags_.push_back({name,std::to_wstring(n),type,language});}
   }
  }
  void native_tags(){
@@ -79,7 +79,7 @@ class AsfReader final:public Reader,public Metadata,public Thumbnail,public Meta
    else if(a.name==L"WM/Picture"&&a.type==1&&data.size()>=9){Cover c;c.type=data[0];DWORD n=le32(data.data()+1);size_t offset=5;auto string=[&]{std::wstring result;for(;;){require(offset+2<=data.size());auto ch=le16(data.data()+offset);offset+=2;if(!ch)return result;result.push_back(wchar_t(ch));}};c.mime=string();c.description=string();require(n<=data.size()-offset);c.bytes.assign(data.data()+offset,data.data()+offset+n);covers_.push_back(std::move(c));}
   }
  }
- static void erase(IWMHeaderInfo3*h,const std::wstring&name){WORD count{};auto hr=h->GetAttributeIndices(0,name.c_str(),nullptr,nullptr,&count);if(FAILED(hr)&&!count)return;if(!count)return;std::vector<WORD> indices(count);check(h->GetAttributeIndices(0,name.c_str(),nullptr,indices.data(),&count));std::sort(indices.rbegin(),indices.rend());for(auto i:indices)check(h->DeleteAttribute(0,i));}
+ static void erase(IWMHeaderInfo3*h,const std::wstring&name,WORD*language=nullptr){WORD count{};auto hr=h->GetAttributeIndices(0,name.c_str(),language,nullptr,&count);if(FAILED(hr)&&!count)return;if(!count)return;std::vector<WORD> indices(count);check(h->GetAttributeIndices(0,name.c_str(),language,indices.data(),&count));std::sort(indices.rbegin(),indices.rend());for(auto i:indices)check(h->DeleteAttribute(0,i));}
  void save(){
   require(!input_.path.empty()&&!input_.remote,STG_E_ACCESSDENIED);
   auto create=reinterpret_cast<CreateEditor>(GetProcAddress(library_,"WMCreateEditor"));require(create,E_NOTIMPL);
@@ -88,11 +88,11 @@ class AsfReader final:public Reader,public Metadata,public Thumbnail,public Meta
   auto result=protect([&]{
    close_reader();require(CopyFileW(path.c_str(),temp,FALSE)!=0,HRESULT_FROM_WIN32(GetLastError()));
    ComPtr<IWMMetadataEditor> editor;check(create(editor.put()));check(editor->Open(temp));ComPtr<IWMHeaderInfo3> header;check(editor->QueryInterface(__uuidof(IWMHeaderInfo3),reinterpret_cast<void**>(header.put())));
-   for(auto&change:changes_){erase(header.p,change.name);if(change.value.empty())continue;WORD index{};
-    if(change.type==WMT_TYPE_DWORD){wchar_t*end{};unsigned long n=wcstoul(change.value.c_str(),&end,10);require(end&&!*end,E_INVALIDARG);DWORD value=n;check(header->AddAttribute(0,change.name.c_str(),&index,WMT_TYPE_DWORD,0,reinterpret_cast<BYTE*>(&value),4));}
-    else{require(change.value.size()<=32767,E_INVALIDARG);check(header->AddAttribute(0,change.name.c_str(),&index,WMT_TYPE_STRING,0,reinterpret_cast<BYTE*>(change.value.data()),DWORD((change.value.size()+1)*2)));}
+   for(auto&change:changes_){erase(header.p,change.name,&change.language);if(change.value.empty())continue;WORD index{};
+    if(change.type==WMT_TYPE_DWORD){wchar_t*end{};unsigned long n=wcstoul(change.value.c_str(),&end,10);require(end&&!*end,E_INVALIDARG);DWORD value=n;check(header->AddAttribute(0,change.name.c_str(),&index,WMT_TYPE_DWORD,change.language,reinterpret_cast<BYTE*>(&value),4));}
+    else{require(change.value.size()<=32767,E_INVALIDARG);check(header->AddAttribute(0,change.name.c_str(),&index,WMT_TYPE_STRING,change.language,reinterpret_cast<BYTE*>(change.value.data()),DWORD((change.value.size()+1)*2)));}
    }
-   if(covers_changed_){erase(header.p,L"WM/Picture");for(auto&c:covers_){WM_PICTURE p{};p.pwszMIMEType=c.mime.data();p.pwszDescription=c.description.data();p.bPictureType=BYTE(c.type);p.pbData=c.bytes.data();p.dwDataLen=DWORD(c.bytes.size());WORD index{};check(header->AddAttribute(0,L"WM/Picture",&index,WMT_TYPE_BINARY,0,reinterpret_cast<BYTE*>(&p),sizeof(p)));}}
+   if(covers_changed_){erase(header.p,L"WM/Picture");for(auto&c:covers_){WM_PICTURE p{};p.pwszMIMEType=c.mime.data();p.pwszDescription=c.description.data();p.bPictureType=BYTE(c.type);p.pbData=c.bytes.data();p.dwDataLen=DWORD(c.bytes.size());WORD index{};check(header->AddAttribute(0,L"WM/Picture",&index,WMT_TYPE_BINARY,c.language,reinterpret_cast<BYTE*>(&p),sizeof(p)));}}
    header.reset();check(editor->Flush());check(editor->Close());editor.reset();require(MoveFileExW(temp,path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0,HRESULT_FROM_WIN32(GetLastError()));return S_OK;
   });if(FAILED(result)){DWORD attrs=GetFileAttributesW(temp);if(attrs!=INVALID_FILE_ATTRIBUTES&&(attrs&FILE_ATTRIBUTE_READONLY))SetFileAttributesW(temp,attrs&~FILE_ATTRIBUTE_READONLY);DeleteFileW(temp);}check(result);
  }
@@ -140,11 +140,20 @@ if(!out)return E_POINTER;*out=nullptr;if(same(id,IID_IUnknown)||same(id,iid_read
   if(pending_.empty())return ended_?S_FALSE:E_FAIL;require(pending_.size()<=capacity,HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));memcpy(out,pending_.data(),pending_.size());DWORD n=DWORD(pending_.size());pending_.clear();return buffer->SetLength(n);});}
  HRESULT STDMETHODCALLTYPE Seek(DWORD*milliseconds)override{return protect([&]{require(milliseconds,E_POINTER);require((!!reader_||!!native_)&&!terminal_,E_UNEXPECTED);require(input_.seekable,STG_E_INVALIDFUNCTION);DWORD target=std::min(*milliseconds,duration_);pending_.clear();ended_=false;if(native_)native_->seek_to(target,pending_);else check(reader_->SetRange(uint64_t(target)*10000,0));*milliseconds=target;return S_OK;});}
  HRESULT STDMETHODCALLTYPE Count(DWORD*out)override{if(!out)return E_POINTER;*out=DWORD(tags_.size());return S_OK;}
- HRESULT STDMETHODCALLTYPE At(DWORD index,wchar_t**key,wchar_t**value)override{return protect([&]{require(key&&value,E_POINTER);*key=*value=nullptr;require(index<tags_.size(),E_INVALIDARG);check(text(tags_[index].name,key));auto hr=text(tags_[index].value,value);if(FAILED(hr)){CoTaskMemFree(*key);*key=nullptr;}return hr;});}
- HRESULT STDMETHODCALLTYPE Get(const char*key,wchar_t**out)override{return protect([&]{require(key&&out,E_POINTER);*out=nullptr;auto name=attribute(key);for(auto&t:tags_)if(!_wcsicmp(name.c_str(),t.name.c_str()))return text(t.value,out);return S_FALSE;});}
- HRESULT STDMETHODCALLTYPE Set(const char*key,const wchar_t*value)override{return protect([&]{require(key&&*key,E_INVALIDARG);mutable_metadata();auto name=attribute(key);Tag change{name,value?value:L"",WMT_TYPE_STRING};for(auto&t:tags_)if(!_wcsicmp(name.c_str(),t.name.c_str())){change.type=t.type;break;}if(name==L"WM/TrackNumber")change.type=WMT_TYPE_DWORD;
-  tags_.erase(std::remove_if(tags_.begin(),tags_.end(),[&](const Tag&t){return !_wcsicmp(t.name.c_str(),name.c_str());}),tags_.end());if(!change.value.empty())tags_.push_back(change);
-  for(auto&t:changes_)if(!_wcsicmp(t.name.c_str(),name.c_str())){t=std::move(change);return S_OK;}changes_.push_back(std::move(change));return S_OK;});}
+ HRESULT STDMETHODCALLTYPE At(DWORD index,wchar_t**key,wchar_t**value)override{return protect([&]{require(key&&value,E_POINTER);*key=*value=nullptr;require(index<tags_.size(),E_INVALIDARG);auto name=tags_[index].name;if(tags_[index].language)name+=L"[lang="+std::to_wstring(tags_[index].language)+L"]";check(text(name,key));auto hr=text(tags_[index].value,value);if(FAILED(hr)){CoTaskMemFree(*key);*key=nullptr;}return hr;});}
+ // The original Metadata ABI has no language parameter. A suffixed key
+ // exposes non-default languages without deleting other language variants.
+ std::wstring language_key(const char*key,WORD&language,bool&specified){
+  std::string value(key);auto at=value.rfind("[lang=");specified=at!=value.npos;
+  if(specified){require(value.back()==']'&&at+7<value.size(),E_INVALIDARG);unsigned n=0;for(size_t i=at+6;i+1<value.size();++i){require(value[i]>='0'&&value[i]<='9'&&n<=6553,E_INVALIDARG);n=n*10+value[i]-'0';}require(n<=65535,E_INVALIDARG);language=WORD(n);value.resize(at);}
+  require(!value.empty(),E_INVALIDARG);return attribute(value.c_str());
+ }
+ HRESULT STDMETHODCALLTYPE Get(const char*key,wchar_t**out)override{return protect([&]{require(key&&out,E_POINTER);*out=nullptr;WORD language{};bool specified{};auto name=language_key(key,language,specified);const Tag*first{};for(auto&t:tags_)if(!_wcsicmp(name.c_str(),t.name.c_str())){if(t.language==language)return text(t.value,out);if(!first)first=&t;}return !specified&&first?text(first->value,out):S_FALSE;});}
+ HRESULT STDMETHODCALLTYPE Set(const char*key,const wchar_t*value)override{return protect([&]{require(key&&*key,E_INVALIDARG);mutable_metadata();WORD language{};bool specified{};auto name=language_key(key,language,specified);
+  if(!specified){const Tag* first{};for(auto&t:tags_)if(!_wcsicmp(t.name.c_str(),name.c_str())){if(!first)first=&t;if(!t.language){first=&t;break;}}if(first)language=first->language;}
+  Tag change{name,value?value:L"",WMT_TYPE_STRING,language};for(auto&t:tags_)if(t.language==language&&!_wcsicmp(t.name.c_str(),name.c_str())){change.type=t.type;break;}if(name==L"WM/TrackNumber")change.type=WMT_TYPE_DWORD;
+  tags_.erase(std::remove_if(tags_.begin(),tags_.end(),[&](const Tag&t){return t.language==language&&!_wcsicmp(t.name.c_str(),name.c_str());}),tags_.end());if(!change.value.empty())tags_.push_back(change);
+  for(auto&t:changes_)if(t.language==language&&!_wcsicmp(t.name.c_str(),name.c_str())){t=std::move(change);return S_OK;}changes_.push_back(std::move(change));return S_OK;});}
  HRESULT STDMETHODCALLTYPE Commit()override{if(terminal_)return commit_result_;terminal_=true;commit_result_=protect([&]{if(!changes_.empty()||covers_changed_)save();return S_OK;});return commit_result_;}
  HRESULT STDMETHODCALLTYPE PictureCount(DWORD*out)override{if(!out)return E_POINTER;*out=DWORD(covers_.size());return S_OK;}
  HRESULT STDMETHODCALLTYPE MaximumBytes(DWORD*out)override{if(!out)return E_POINTER;*out=60000;return S_OK;}
